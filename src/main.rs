@@ -96,7 +96,10 @@ async fn fetch_html(source: &str) -> Result<(String, Url)> {
     }
 }
 
-fn collect_srcset_urls<'a>(srcset: &'a str, base_url: &'a Url) -> impl Iterator<Item = String> + 'a {
+fn collect_srcset_urls<'a>(
+    srcset: &'a str,
+    base_url: &'a Url,
+) -> impl Iterator<Item = String> + 'a {
     srcset.split(',').filter_map(move |part| {
         let url_part = part.trim().split_whitespace().next()?;
         resolve_url(base_url, url_part)
@@ -123,9 +126,13 @@ fn extract_resources(html: &str, base_url: &Url) -> Result<Vec<(String, &'static
     ];
 
     for (selector_str, attr, resource_type) in extractors {
-        let Ok(selector) = Selector::parse(selector_str) else { continue };
+        let Ok(selector) = Selector::parse(selector_str) else {
+            continue;
+        };
         for element in document.select(&selector) {
-            let Some(value) = element.value().attr(attr) else { continue };
+            let Some(value) = element.value().attr(attr) else {
+                continue;
+            };
             if let Some(url) = resolve_url(base_url, value) {
                 resources.insert((url, *resource_type));
             }
@@ -134,7 +141,9 @@ fn extract_resources(html: &str, base_url: &Url) -> Result<Vec<(String, &'static
 
     if let Ok(selector) = Selector::parse("[srcset]") {
         for element in document.select(&selector) {
-            let Some(srcset) = element.value().attr("srcset") else { continue };
+            let Some(srcset) = element.value().attr("srcset") else {
+                continue;
+            };
             for url in collect_srcset_urls(srcset, base_url) {
                 resources.insert((url, "srcset"));
             }
