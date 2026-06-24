@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::stream::{self, StreamExt};
@@ -45,6 +47,7 @@ enum ResourceStatus {
 }
 
 #[tokio::main]
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -78,6 +81,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn fetch_html(source: &str) -> Result<(String, Url)> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let url = Url::parse(source)?;
@@ -106,6 +110,45 @@ fn collect_srcset_urls<'a>(
     })
 }
 
+fn collect_attr_resources(
+    document: &Html,
+    base_url: &Url,
+    selector_str: &str,
+    attr: &str,
+    resource_type: &'static str,
+    resources: &mut HashSet<(String, &'static str)>,
+) {
+    let Ok(selector) = Selector::parse(selector_str) else {
+        return;
+    };
+    for element in document.select(&selector) {
+        let Some(value) = element.value().attr(attr) else {
+            continue;
+        };
+        if let Some(url) = resolve_url(base_url, value) {
+            resources.insert((url, resource_type));
+        }
+    }
+}
+
+fn collect_srcset_resources(
+    document: &Html,
+    base_url: &Url,
+    resources: &mut HashSet<(String, &'static str)>,
+) {
+    let Ok(selector) = Selector::parse("[srcset]") else {
+        return;
+    };
+    for element in document.select(&selector) {
+        let Some(srcset) = element.value().attr("srcset") else {
+            continue;
+        };
+        for url in collect_srcset_urls(srcset, base_url) {
+            resources.insert((url, "srcset"));
+        }
+    }
+}
+
 fn extract_resources(html: &str, base_url: &Url) -> Result<Vec<(String, &'static str)>> {
     let document = Html::parse_document(html);
     let mut resources = HashSet::new();
@@ -126,29 +169,17 @@ fn extract_resources(html: &str, base_url: &Url) -> Result<Vec<(String, &'static
     ];
 
     for (selector_str, attr, resource_type) in extractors {
-        let Ok(selector) = Selector::parse(selector_str) else {
-            continue;
-        };
-        for element in document.select(&selector) {
-            let Some(value) = element.value().attr(attr) else {
-                continue;
-            };
-            if let Some(url) = resolve_url(base_url, value) {
-                resources.insert((url, *resource_type));
-            }
-        }
+        collect_attr_resources(
+            &document,
+            base_url,
+            selector_str,
+            attr,
+            resource_type,
+            &mut resources,
+        );
     }
 
-    if let Ok(selector) = Selector::parse("[srcset]") {
-        for element in document.select(&selector) {
-            let Some(srcset) = element.value().attr("srcset") else {
-                continue;
-            };
-            for url in collect_srcset_urls(srcset, base_url) {
-                resources.insert((url, "srcset"));
-            }
-        }
-    }
+    collect_srcset_resources(&document, base_url, &mut resources);
 
     Ok(resources.into_iter().collect())
 }
@@ -168,6 +199,7 @@ fn resolve_url(base: &Url, href: &str) -> Option<String> {
     base.join(trimmed).ok().map(|u| u.to_string())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn check_resource(client: &Client, url: String, resource_type: &'static str) -> Resource {
     // Check file:// URLs by checking if file exists
     if url.starts_with("file://") {
@@ -203,6 +235,7 @@ async fn check_resource(client: &Client, url: String, resource_type: &'static st
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn print_results(results: &[Resource], missing_only: bool, json: bool) {
     if json {
         print_json(results, missing_only);
@@ -211,6 +244,7 @@ fn print_results(results: &[Resource], missing_only: bool, json: bool) {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn print_json(results: &[Resource], missing_only: bool) {
     let items: Vec<_> = results
         .iter()
@@ -232,24 +266,145 @@ fn print_json(results: &[Resource], missing_only: bool) {
     println!("{}", serde_json::to_string_pretty(&items).unwrap());
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn print_text(results: &[Resource], missing_only: bool) {
     let mut ok_count = 0;
     let mut failed_count = 0;
 
     for r in results {
-        match &r.status {
-            ResourceStatus::Ok(_) => {
-                ok_count += 1;
-                if !missing_only {
-                    println!("✓ [{}] {}", r.resource_type, r.url);
-                }
-            }
-            ResourceStatus::Failed(err) => {
-                failed_count += 1;
-                println!("✗ [{}] {} - {}", r.resource_type, r.url, err);
-            }
-        }
+        print_resource_status_line(r, missing_only, &mut ok_count, &mut failed_count);
     }
 
     eprintln!("\n{} ok, {} missing", ok_count, failed_count);
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn print_resource_status_line(
+    resource: &Resource,
+    missing_only: bool,
+    ok_count: &mut usize,
+    failed_count: &mut usize,
+) {
+    match &resource.status {
+        ResourceStatus::Ok(_) => {
+            *ok_count += 1;
+            if missing_only {
+                return;
+            }
+            println!("✓ [{}] {}", resource.resource_type, resource.url);
+        }
+        ResourceStatus::Failed(err) => {
+            *failed_count += 1;
+            println!("✗ [{}] {} - {}", resource.resource_type, resource.url, err);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn base_url() -> Url {
+        Url::parse("https://example.com/path/page.html").expect("base URL")
+    }
+
+    #[test]
+    fn resolve_url_skips_non_fetchable_references() {
+        let base = base_url();
+
+        assert_eq!(resolve_url(&base, "data:image/png;base64,abc"), None);
+        assert_eq!(resolve_url(&base, "javascript:alert(1)"), None);
+        assert_eq!(resolve_url(&base, "#section"), None);
+        assert_eq!(resolve_url(&base, "   "), None);
+    }
+
+    #[test]
+    fn resolve_url_handles_absolute_relative_and_root_paths() {
+        let base = base_url();
+
+        assert_eq!(
+            resolve_url(&base, "https://cdn.example.com/app.js").as_deref(),
+            Some("https://cdn.example.com/app.js")
+        );
+        assert_eq!(
+            resolve_url(&base, "image.png").as_deref(),
+            Some("https://example.com/path/image.png")
+        );
+        assert_eq!(
+            resolve_url(&base, "/assets/site.css").as_deref(),
+            Some("https://example.com/assets/site.css")
+        );
+    }
+
+    #[test]
+    fn collect_srcset_urls_extracts_first_token_and_resolves_urls() {
+        let base = base_url();
+        let urls: Vec<_> = collect_srcset_urls(
+            "small.png 1x, /large.png 2x, https://cdn.example.com/full.png 3x",
+            &base,
+        )
+        .collect();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/path/small.png".to_string(),
+                "https://example.com/large.png".to_string(),
+                "https://cdn.example.com/full.png".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_resources_finds_supported_attributes_and_srcset() {
+        let base = base_url();
+        let html = r#"
+            <html>
+              <head>
+                <link rel="stylesheet" href="/site.css">
+                <link rel="icon" href="favicon.ico">
+                <script src="app.js"></script>
+              </head>
+              <body>
+                <img src="hero.png" srcset="hero-1x.png 1x, /hero-2x.png 2x">
+                <video src="/movie.mp4"></video>
+                <iframe src="frame.html"></iframe>
+                <object data="/file.pdf"></object>
+              </body>
+            </html>
+        "#;
+
+        let mut resources = extract_resources(html, &base).expect("resources");
+        resources.sort();
+
+        assert!(resources.contains(&("https://example.com/site.css".to_string(), "stylesheet")));
+        assert!(resources.contains(&("https://example.com/path/favicon.ico".to_string(), "icon")));
+        assert!(resources.contains(&("https://example.com/path/app.js".to_string(), "script")));
+        assert!(resources.contains(&("https://example.com/path/hero.png".to_string(), "image")));
+        assert!(
+            resources.contains(&("https://example.com/path/hero-1x.png".to_string(), "srcset"))
+        );
+        assert!(resources.contains(&("https://example.com/hero-2x.png".to_string(), "srcset")));
+        assert!(resources.contains(&("https://example.com/movie.mp4".to_string(), "video")));
+        assert!(resources.contains(&("https://example.com/path/frame.html".to_string(), "iframe")));
+        assert!(resources.contains(&("https://example.com/file.pdf".to_string(), "object")));
+    }
+
+    #[test]
+    fn extract_resources_deduplicates_urls_by_type() {
+        let base = base_url();
+        let html = r#"<img src="same.png"><img src="same.png"><script src="same.png"></script>"#;
+
+        let resources = extract_resources(html, &base).expect("resources");
+
+        assert_eq!(resources.len(), 2);
+        assert!(resources.contains(&("https://example.com/path/same.png".to_string(), "image")));
+        assert!(resources.contains(&("https://example.com/path/same.png".to_string(), "script")));
+    }
+
+    #[test]
+    fn clap_definition_is_valid() {
+        Args::command().debug_assert();
+    }
 }
